@@ -11,10 +11,6 @@
 #import "ViewController.h"
 #import "SettingView.h"
 
-#define kBtnHeight     50
-#define kHorMargin     10
-#define kVerMargin     80
-
 @interface ViewController ()
 
 @end
@@ -29,6 +25,7 @@
     UILabel         *textModeLabel;             //文字提示
     Boolean         is_audio_only_;
     Boolean         is_fast_startup_;           //是否快速启动模式
+    Boolean         is_low_latency_mode_;       //是否开启极速模式
     NSInteger       buffer_time_;               //buffer时间
     Boolean         is_hardware_decoder_;       //默认软解码
     Boolean         is_rtsp_tcp_mode_;          //仅用于rtsp流，设置TCP传输模式
@@ -43,9 +40,12 @@
     UIButton        *muteButton;                //静音 取消静音
     UIButton        *switchUrlButton;           //切换url按钮
     UIButton        *saveImageButton;           //快照按钮
+    UIButton        *rotationButton;            //view旋转按钮
     
     UIImage         *image_path;
     NSString        *tmp_path;
+    
+    NSInteger       rotate_degrees;             //view旋转角度 0则不旋转
 }
 
 //(本demo快照最终拷贝保存到iOS设备“照片”目录，实际保存位置可自行设置，或以应用场景为准)
@@ -119,6 +119,25 @@
             NSLog(@"[event]快照失败: %@", param3);
         }
     }
+    else if (nID == EVENT_DANIULIVE_ERC_PLAYER_START_BUFFERING)
+    {
+        //NSLog(@"[event]开始buffer..");
+    }
+    else if (nID == EVENT_DANIULIVE_ERC_PLAYER_BUFFERING)
+    {
+        //NSLog(@"[event]buffer百分比: %lld", param1);
+    }
+    else if (nID == EVENT_DANIULIVE_ERC_PLAYER_STOP_BUFFERING)
+    {
+        //NSLog(@"[event]停止buffer..");
+    }
+    else if (nID == EVENT_DANIULIVE_ERC_PLAYER_DOWNLOAD_SPEED)
+    {
+        NSInteger speed_kbps = (NSInteger)param1*8/1000;
+        NSInteger speed_KBs = (NSInteger)param1/1024;
+        
+        NSLog(@"[event]download speed :%ld kbps - %ld KB/s", (long)speed_kbps, (long)speed_KBs);
+    }
     else
         NSLog(@"[event]nID:%lx", (long)nID);
     
@@ -127,7 +146,8 @@
 
 - (instancetype)initParameter:(NSString*)url isHalfScreen:(Boolean)isHalfScreenVal
                    bufferTime:(NSInteger)bufferTime
-                isFastStartup:(Boolean)isFastStartup
+                  isFastStartup:(Boolean)isFastStartup
+                  isLowLantecy:(Boolean)isLowLantecy
                   isHWDecoder:(Boolean)isHWDecoder
                 isRTSPTcpMode:(Boolean)isRTSPTcpMode
 {
@@ -139,6 +159,7 @@
         _streamUrl = url;
         is_half_screen_ = isHalfScreenVal;
         is_fast_startup_ = isFastStartup;
+        is_low_latency_mode_ = isLowLantecy;
         buffer_time_ = bufferTime;
         is_hardware_decoder_ = isHWDecoder;
         is_rtsp_tcp_mode_ = isRTSPTcpMode;
@@ -157,6 +178,8 @@
     
     is_audio_only_ = NO;
     
+    rotate_degrees = 0;
+    
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(orientChange:)name:UIDeviceOrientationDidChangeNotification object:nil];
     
     //当前屏幕宽高
@@ -169,7 +192,7 @@
         playerHeight = screenWidth*3/4;
     
     NSLog(@"screenWidth:%ld, screenHeight:%ld",(long)screenWidth, (long)screenHeight);
-    
+
     self.view = [[UIView alloc] initWithFrame:[[UIScreen mainScreen] applicationFrame]];
     
     _player = [[SmartPlayerSDK alloc] init];
@@ -179,14 +202,23 @@
         return;
     }
     
+    //_player.yuvDataBlock = nil; //如不需要回调YUV数据
+    
+    /*
+    _player.yuvDataBlock = ^void(int width, int height, unsigned long long time_stamp,
+                                 unsigned char*yData, unsigned char* uData, unsigned char*vData,
+                                 int yStride, int uStride, int vStride)
+    {
+        //NSLog(@"[PlaySideYuvCallback] width:%d, height:%d, ts:%lld, y:%d, u:%d, v:%d", width, height, time_stamp, yStride, uStride, vStride);
+        //这里接收底层回调的YUV数据
+    };
+     */
+    
     if (_player.delegate == nil)
     {
         _player.delegate = self;
         NSLog(@"SmartPlayerSDK _player.delegate:%@", _player);
     }
-    
-    NSString* sdkVersion = [_player SmartPlayerGetSDKVersionID];
-    NSLog(@"sdk version:%@",sdkVersion);
     
     NSInteger initRet = [_player SmartPlayerInitPlayer];
     if ( initRet != DANIULIVE_RETURN_OK )
@@ -203,30 +235,40 @@
     }
     
     [_player SmartPlayerSetVideoDecoderMode:videoDecoderMode];
-    
+
     if (is_audio_only_) {
         [_player SmartPlayerSetPlayView:nil];
     }
     else
     {
+        //如果只需外部回调YUV数据，自己绘制，无需创建view和设置view到SDK
         _glView = (__bridge UIView *)([SmartPlayerSDK SmartPlayerCreatePlayView:0 y:0 width:screenWidth height:playerHeight]);
         
         if (_glView == nil ) {
             NSLog(@"createPlayView failed..");
             return;
         }
-        
+    
         [self.view addSubview:_glView];
         
         [_player SmartPlayerSetPlayView:(__bridge void *)(_glView)];
     }
+    
+    //设置YUV数据回调输出
+    [_player SmartPlayerSetYuvBlock:true];
     
     if (_streamUrl.length == 0) {
         NSLog(@"_streamUrl with nil..");
         return;
     }
     
-    if(buffer_time_>0)
+    //超低延迟模式
+    [_player SmartPlayerSetLowLatencyMode:(NSInteger)is_low_latency_mode_];
+    
+    //设置视频view旋转角度
+    [_player SmartPlayerSetRotation:rotate_degrees];
+    
+    if(buffer_time_ >= 0)
     {
         [_player SmartPlayerSetBuffer:buffer_time_];
     }
@@ -241,6 +283,11 @@
     
     NSInteger image_flag = 1;
     [_player SmartPlayerSaveImageFlag:image_flag];
+    
+    //如需查看实时流量信息，可打开以下接口
+    //NSInteger is_report = 1;
+    //NSInteger report_interval = 1;
+    //[_player SmartPlayerSetReportDownloadSpeed:is_report report_interval:report_interval];
     
     [_player SmartPlayerStart];
 
@@ -291,9 +338,44 @@
     [switchUrlButton addTarget:self action:@selector(SwitchUrlBtn:) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:switchUrlButton];
     
+    //view旋转按钮
+    rotationButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    rotationButton.frame = CGRectMake(45, playerHeight - 80, 120, 80);
+    rotationButton.center = CGPointMake(self.view.frame.size.width / 6, rotationButton.frame.origin.y + rotationButton.frame.size.height / 2);
+    
+    rotationButton.layer.cornerRadius = muteButton.frame.size.width / 2;
+    rotationButton.layer.borderColor = [UIColor greenColor].CGColor;
+    rotationButton.layer.borderWidth = lineWidth;
+    
+    [rotationButton setTitleColor:[UIColor greenColor] forState:UIControlStateNormal];
+    
+    NSString* rotation_text;
+    
+    if ( 0 == rotate_degrees )
+    {
+        rotation_text = @"旋转90度";
+    }
+    else if ( 90 == rotate_degrees)
+    {
+        rotation_text = @"旋转180度";
+    }
+    else if ( 180 == rotate_degrees)
+    {
+        rotation_text = @"旋转270度";
+    }
+    else if ( 270 == rotate_degrees)
+    {
+        rotation_text = @"不旋转";
+    }
+    
+    [rotationButton setTitle:rotation_text forState:UIControlStateNormal];
+    
+    [rotationButton addTarget:self action:@selector(rotateSettingBtn:) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:rotationButton];
+    
     //返回按钮
     backSettingsButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    backSettingsButton.frame = CGRectMake(45, playerHeight - 80, 120, 80);
+    backSettingsButton.frame = CGRectMake(45, playerHeight - 20, 120, 80);
     backSettingsButton.center = CGPointMake(self.view.frame.size.width / 6, backSettingsButton.frame.origin.y + backSettingsButton.frame.size.height / 2);
     
     backSettingsButton.layer.cornerRadius = muteButton.frame.size.width / 2;
@@ -383,18 +465,52 @@
     {
         is_switch_url = !is_switch_url;
         
+        NSString* switchUrl = @"";
+        
+        //本demo url在原始rtmp url和hks流中切换
         if ( is_switch_url )
         {
-            _streamUrl = @"rtmp://live.hkstv.hk.lxdns.com/live/hks";
+            switchUrl = @"rtmp://live.hkstv.hk.lxdns.com/live/hks";
             [switchUrlButton setTitle:@"切换URL2" forState:UIControlStateNormal];
         }
         else
         {
-            _streamUrl = @"rtmp://live.hkstv.hk.lxdns.com/live/hks";
+            switchUrl = _streamUrl;
             [switchUrlButton setTitle:@"切换URL1" forState:UIControlStateNormal];
         }
         
-        [_player SmartPlayerSwitchPlaybackUrl:_streamUrl];
+        [_player SmartPlayerSwitchPlaybackUrl:switchUrl];
+    }
+}
+
+- (void)rotateSettingBtn:(id)sender {
+    if ( _player != nil )
+    {
+        rotate_degrees += 90;
+        rotate_degrees = rotate_degrees % 360;
+        
+        NSString* rotation_text;
+        
+        if ( 0 == rotate_degrees )
+        {
+            rotation_text = @"旋转90度";
+        }
+        else if ( 90 == rotate_degrees)
+        {
+            rotation_text = @"旋转180度";
+        }
+        else if ( 180 == rotate_degrees)
+        {
+            rotation_text = @"旋转270度";
+        }
+        else if ( 270 == rotate_degrees)
+        {
+            rotation_text = @"不旋转";
+        }
+        
+        [rotationButton setTitle:rotation_text forState:UIControlStateNormal];
+        
+        [_player SmartPlayerSetRotation:rotate_degrees];
     }
 }
 
@@ -456,6 +572,12 @@
             break;
         case UIDeviceOrientationLandscapeRight:
             isPortrait = false;
+            break;
+        case UIDeviceOrientationFaceUp:
+            isPortrait = true;
+            break;
+        case UIDeviceOrientationFaceDown:
+            isPortrait = true;
             break;
             
         default:
